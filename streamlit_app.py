@@ -1,21 +1,21 @@
 """
 ================================================================================
   Data Loader & Explorer - Streamlit in Snowflake App
+  複数フォーマット対応のデータロード＆探索アプリ
 ================================================================================
 
-A comprehensive data management application for Snowflake.
+【対応フォーマット】
+- CSV / TSV（カンマ・タブ区切り）
+- JSON
+- Parquet
+- Avro
+- ORC
 
-Features:
-- Multi-format file upload (CSV, TSV, JSON, Parquet, Avro, ORC)
-- Instant table creation with auto-detected schemas
-- Visual query builder for data exploration
-- SQL generation and execution
-- Data export in CSV, JSON, TSV formats
-
-Usage:
-1. Open Snowsight and navigate to Streamlit
-2. Create a new Streamlit App
-3. Paste this code and run
+【機能】
+- ファイルアップロード → テーブル作成
+- カラム選択 & WHERE条件指定
+- SQL生成 & 実行
+- 結果表示 & ダウンロード
 
 ================================================================================
 """
@@ -25,10 +25,11 @@ from snowflake.snowpark.context import get_active_session
 from snowflake.snowpark.types import *
 import pandas as pd
 import io
+import json
 from datetime import datetime
 
 # =========================================================
-# Page Configuration
+# ページ設定
 # =========================================================
 st.set_page_config(
     page_title="Data Loader & Explorer",
@@ -37,7 +38,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Get Snowflake Session
+# Snowflakeセッション取得
 @st.cache_resource
 def get_snowflake_session():
     return get_active_session()
@@ -45,7 +46,7 @@ def get_snowflake_session():
 session = get_snowflake_session()
 
 # =========================================================
-# Session State Initialization
+# セッション状態の初期化
 # =========================================================
 if 'loaded_table' not in st.session_state:
     st.session_state.loaded_table = None
@@ -55,35 +56,163 @@ if 'current_mode' not in st.session_state:
     st.session_state.current_mode = 'upload'
 
 # =========================================================
-# Utility Functions
+# 共通関数
 # =========================================================
 @st.cache_data(ttl=300)
 def get_databases():
-    """Get list of databases"""
+    """データベース一覧を取得"""
     result = session.sql("SHOW DATABASES").collect()
     return [row['name'] for row in result]
 
 @st.cache_data(ttl=300)
 def get_schemas(database):
-    """Get list of schemas in a database"""
+    """スキーマ一覧を取得"""
     result = session.sql(f"SHOW SCHEMAS IN DATABASE {database}").collect()
     return [row['name'] for row in result]
 
 @st.cache_data(ttl=60)
 def get_tables(database, schema):
-    """Get list of tables (excluding temporary tables)"""
+    """テーブル一覧を取得（一時テーブルを除外）"""
     result = session.sql(f"SHOW TABLES IN {database}.{schema}").collect()
+    # SNOWPARK_TEMP や一時テーブルを除外
     excluded_prefixes = ('SNOWPARK_TEMP', 'TEMP_', '_TEMP', 'TMP_')
     return [row['name'] for row in result 
             if not row['name'].upper().startswith(excluded_prefixes)]
 
 def get_table_columns(database, schema, table):
-    """Get column information for a table"""
+    """テーブルのカラム情報を取得"""
     result = session.sql(f"DESCRIBE TABLE {database}.{schema}.{table}").collect()
     return [(row['name'], row['type']) for row in result]
 
+@st.cache_data(ttl=600, show_spinner=False)
+def get_table_descriptions_with_ai(database: str, schema: str, table: str):
+    """AI_GENERATE_TABLE_DESCを使ってテーブル・カラム説明を生成（10分キャッシュ）"""
+    import re
+    
+    full_table_name = f"{database}.{schema}.{table}"
+    
+    # AI_GENERATE_TABLE_DESCを試行
+    try:
+        # AI_GENERATE_TABLE_DESCのクエリ（日本語で回答を要求）
+        ai_query = f"""
+        SELECT SNOWFLAKE.CORTEX.AI_GENERATE_TABLE_DESC(
+            TABLE_NAME => '{full_table_name}',
+            LANGUAGE => 'ja'
+        )
+        """
+        ai_result = session.sql(ai_query).collect()
+        
+        if ai_result and ai_result[0][0]:
+            ai_data = json.loads(ai_result[0][0])
+            return {
+                'table_description': ai_data.get('table_description', ''),
+                'column_descriptions': ai_data.get('column_descriptions', {})
+            }
+    except Exception:
+        pass
+    
+    # AI_GENERATE_TABLE_DESCが使えない場合、CORTEX.COMPLETEで代替実装
+    try:
+        # テーブル構造を取得
+        describe_result = session.sql(f"DESCRIBE TABLE {full_table_name}").collect()
+        
+        if not describe_result:
+            return None
+        
+        # カラム情報をまとめる
+        columns_info = []
+        column_names = []
+        for row in describe_result:
+            columns_info.append(f"{row['name']} ({row['type']})")
+            column_names.append(row['name'])
+        
+        columns_text = "、".join(columns_info)
+        column_names_json = json.dumps(column_names, ensure_ascii=False)
+        
+        # AI説明生成プロンプト
+        prompt = f"""あなたはデータベースの専門家です。以下のテーブル情報を分析し、日本語で説明を生成してください。
+
+テーブル名: {table}
+カラム構成: {columns_text}
+
+以下のJSON形式で回答してください。column_descriptionsには全てのカラムの説明を含めてください:
+{{"table_description": "テーブルの用途を1-2文で説明", "column_descriptions": {{"カラム名1": "そのカラムの意味や用途", "カラム名2": "そのカラムの意味や用途"}}}}
+
+カラム名一覧: {column_names_json}"""
+        
+        # プロンプトをエスケープ
+        escaped_prompt = prompt.replace("'", "''")
+        cortex_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{escaped_prompt}')"
+        cortex_result = session.sql(cortex_query).collect()
+        
+        if cortex_result and cortex_result[0][0]:
+            response_text = cortex_result[0][0]
+            # JSON部分を抽出
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            
+            if json_match:
+                json_text = json_match.group(0)
+                ai_data = json.loads(json_text)
+                
+                return {
+                    'table_description': ai_data.get('table_description', ''),
+                    'column_descriptions': ai_data.get('column_descriptions', {})
+                }
+    except Exception as e:
+        # エラー時はNoneを返す（UIでハンドリング）
+        pass
+    
+    return None
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_table_columns_with_descriptions(database: str, schema: str, table: str):
+    """テーブルのカラム名、データ型、AI生成説明を取得（10分キャッシュ）"""
+    try:
+        full_table_name = f"{database}.{schema}.{table}"
+        result = session.sql(f"DESCRIBE TABLE {full_table_name}").collect()
+        columns_with_desc = []
+        
+        # AI説明を取得
+        ai_descriptions = get_table_descriptions_with_ai(database, schema, table)
+        
+        for row in result:
+            col_name = row['name']
+            col_type = row['type']
+            
+            # サンプル値を取得
+            sample_text = ""
+            try:
+                sample_query = f'SELECT DISTINCT "{col_name}" FROM {full_table_name} WHERE "{col_name}" IS NOT NULL LIMIT 3'
+                sample_result = session.sql(sample_query).collect()
+                
+                if sample_result:
+                    sample_values = [str(r[0])[:30] for r in sample_result]  # 各値は30文字まで
+                    sample_text = "、".join(sample_values[:3])
+                else:
+                    sample_text = "（データなし）"
+            except Exception:
+                sample_text = "（取得エラー）"
+            
+            # AI説明を取得
+            ai_desc = ""
+            if ai_descriptions and ai_descriptions.get('column_descriptions', {}).get(col_name):
+                ai_desc = ai_descriptions['column_descriptions'][col_name]
+            
+            columns_with_desc.append({
+                'name': col_name,
+                'type': col_type,
+                'ai_description': ai_desc,
+                'sample_values': sample_text
+            })
+        
+        table_description = ai_descriptions.get('table_description', '') if ai_descriptions else ''
+        return columns_with_desc, table_description
+        
+    except Exception as e:
+        return [], ""
+
 def add_query_history(query: str, status: str, rows: int = 0):
-    """Add query to history"""
+    """クエリ履歴に追加"""
     record = {
         'timestamp': datetime.now(),
         'query': query[:100] + '...' if len(query) > 100 else query,
@@ -94,7 +223,7 @@ def add_query_history(query: str, status: str, rows: int = 0):
     st.session_state.query_history = st.session_state.query_history[:10]
 
 def detect_file_type(uploaded_file):
-    """Detect file type from extension"""
+    """ファイルタイプを検出"""
     filename = uploaded_file.name.lower()
     if filename.endswith('.csv'):
         return 'CSV'
@@ -112,51 +241,51 @@ def detect_file_type(uploaded_file):
         return 'UNKNOWN'
 
 # =========================================================
-# Sidebar
+# サイドバー
 # =========================================================
 def render_sidebar():
-    st.sidebar.header("🧭 Menu")
+    st.sidebar.header("🧭 メニュー")
     
-    # Mode Selection
-    st.sidebar.markdown("### 📋 Features")
+    # モード選択
+    st.sidebar.markdown("### 📋 機能選択")
     
-    if st.sidebar.button("📤 Data Upload", use_container_width=True, 
+    if st.sidebar.button("📤 データアップロード", use_container_width=True, 
                          type="primary" if st.session_state.current_mode == 'upload' else "secondary"):
         st.session_state.current_mode = 'upload'
         st.rerun()
     
-    if st.sidebar.button("🔍 Data Explorer", use_container_width=True,
+    if st.sidebar.button("🔍 データ探索", use_container_width=True,
                          type="primary" if st.session_state.current_mode == 'explore' else "secondary"):
         st.session_state.current_mode = 'explore'
         st.rerun()
     
     st.sidebar.markdown("---")
     
-    # Database & Schema Selection
-    st.sidebar.markdown("### ⚙️ Connection")
+    # データベース・スキーマ選択
+    st.sidebar.markdown("### ⚙️ 接続設定")
     
     databases = get_databases()
     selected_db = st.sidebar.selectbox(
-        "📁 Database",
+        "📁 データベース",
         databases,
-        index=0,
+        index=databases.index("FROSTYFRIDAY") if "FROSTYFRIDAY" in databases else 0,
         key="sidebar_db"
     )
     
     schemas = get_schemas(selected_db)
     selected_schema = st.sidebar.selectbox(
-        "📂 Schema",
+        "📂 スキーマ",
         schemas,
-        index=0,
+        index=schemas.index("WEEK80") if "WEEK80" in schemas else 0,
         key="sidebar_schema"
     )
     
-    st.sidebar.info(f"📍 **Current Location**\n\n`{selected_db}.{selected_schema}`")
+    st.sidebar.info(f"📍 **現在の場所**\n\n`{selected_db}.{selected_schema}`")
     
     st.sidebar.markdown("---")
     
-    # Supported Formats
-    st.sidebar.markdown("### 📁 Supported Formats")
+    # 対応フォーマット
+    st.sidebar.markdown("### 📁 対応フォーマット")
     st.sidebar.markdown("""
     - ✅ CSV / TSV
     - ✅ JSON / JSONL
@@ -165,94 +294,121 @@ def render_sidebar():
     - ✅ ORC
     """)
     
-    # Recent History
+    # 最近の履歴
     if st.session_state.query_history:
         st.sidebar.markdown("---")
-        st.sidebar.markdown("### 📝 Recent Queries")
+        st.sidebar.markdown("### 📝 最近の実行")
         for i, h in enumerate(st.session_state.query_history[:3]):
-            icon = "✅" if h['status'] == "Success" else "❌"
-            st.sidebar.caption(f"{icon} {h['timestamp'].strftime('%H:%M')} - {h['rows']} rows")
+            icon = "✅" if h['status'] == "成功" else "❌"
+            st.sidebar.caption(f"{icon} {h['timestamp'].strftime('%H:%M')} - {h['rows']}行")
     
     return selected_db, selected_schema
 
 # =========================================================
-# Data Upload Page
+# Part 1: データアップロード機能
 # =========================================================
 def render_upload_page(selected_db, selected_schema):
     st.markdown("""
     <div style="text-align: center; padding: 1rem 0;">
         <h1>📤 Data Loader</h1>
-        <p style="font-size: 1.1em; color: #666;">Upload files to create Snowflake tables</p>
+        <p style="font-size: 1.1em; color: #666;">ファイルをアップロードしてSnowflakeテーブルを作成</p>
     </div>
     """, unsafe_allow_html=True)
     
     st.divider()
     
+    # 2カラムレイアウト
     col1, col2 = st.columns([1, 1])
     
+    # デフォルト値を事前に定義（変数スコープ問題を回避）
+    delimiter = ","
+    encoding = "utf-8"
+    has_header = True
+    json_lines = False
+    
     with col1:
-        st.subheader("1️⃣ Upload File")
+        st.subheader("1️⃣ ファイルをアップロード")
         
         uploaded_file = st.file_uploader(
-            "Supported: CSV, TSV, JSON, Parquet, Avro, ORC",
+            "対応形式: CSV, TSV, JSON, Parquet, Avro, ORC",
             type=['csv', 'tsv', 'json', 'jsonl', 'parquet', 'avro', 'orc'],
-            help="Drag and drop or click to browse"
+            help="ファイルをドラッグ&ドロップまたはクリックして選択"
         )
         
-        if uploaded_file:
-            file_type = detect_file_type(uploaded_file)
-            
-            st.success(f"📁 **{uploaded_file.name}** ({file_type})")
-            
-            col_info1, col_info2 = st.columns(2)
-            with col_info1:
-                st.metric("Size", f"{uploaded_file.size / 1024:.1f} KB")
-            with col_info2:
-                st.metric("Format", file_type)
-            
-            with st.expander("📝 Load Options", expanded=True):
-                if file_type in ['CSV', 'TSV']:
-                    delimiter = st.selectbox(
-                        "Delimiter",
-                        [",", "\t", ";", "|"],
-                        index=0 if file_type == 'CSV' else 1
-                    )
-                    encoding = st.selectbox(
-                        "Encoding",
-                        ["utf-8", "shift-jis", "cp932"],
-                        index=0
-                    )
-                    has_header = st.checkbox("Has header row", value=True)
-                elif file_type == 'JSON':
-                    json_lines = st.checkbox("JSON Lines format (one record per line)", value=True)
-                else:
-                    st.info(f"📦 {file_type} format will be loaded automatically")
+        file_type = None
+        if uploaded_file is not None:
+            try:
+                file_type = detect_file_type(uploaded_file)
+                
+                # ファイル情報表示
+                st.success(f"📁 **{uploaded_file.name}** ({file_type})")
+                
+                col_info1, col_info2 = st.columns(2)
+                with col_info1:
+                    st.metric("サイズ", f"{uploaded_file.size / 1024:.1f} KB")
+                with col_info2:
+                    st.metric("形式", file_type)
+                
+                # フォーマット別オプション
+                with st.expander("📝 読み込みオプション", expanded=True):
+                    if file_type in ['CSV', 'TSV']:
+                        delimiter = st.selectbox(
+                            "区切り文字",
+                            [",", "\t", ";", "|"],
+                            index=0 if file_type == 'CSV' else 1
+                        )
+                        encoding = st.selectbox(
+                            "エンコーディング",
+                            ["utf-8", "shift-jis", "cp932"],
+                            index=0
+                        )
+                        has_header = st.checkbox("ヘッダー行あり", value=True)
+                    elif file_type == 'JSON':
+                        json_lines = st.checkbox(
+                            "JSON Lines形式（1行1レコード）", 
+                            value=False,
+                            help="通常のJSON配列 [{},...] の場合はチェック不要。自動検出されます。"
+                        )
+                    else:
+                        st.info(f"📦 {file_type}形式は自動的に読み込まれます")
+            except Exception as upload_err:
+                st.error(f"❌ ファイル情報の取得に失敗しました: {str(upload_err)}")
     
     with col2:
-        st.subheader("2️⃣ Table Settings")
+        st.subheader("2️⃣ テーブル設定")
+        
+        # デフォルトのテーブル名を安全に生成
+        default_table_name = "MY_TABLE"
+        if uploaded_file is not None:
+            try:
+                default_table_name = uploaded_file.name.rsplit('.', 1)[0].upper().replace(" ", "_").replace("-", "_")
+            except:
+                default_table_name = "MY_TABLE"
         
         table_name = st.text_input(
-            "Table Name",
-            value=uploaded_file.name.rsplit('.', 1)[0].upper().replace(" ", "_").replace("-", "_") if uploaded_file else "MY_TABLE",
-            help="Alphanumeric characters and underscores only"
+            "テーブル名",
+            value=default_table_name,
+            help="英数字とアンダースコアのみ使用可"
         ).upper().replace(" ", "_")
         
         if_exists = st.radio(
-            "If table exists",
-            ["Error", "Replace (DROP & CREATE)", "Append (INSERT)"],
+            "同名テーブルが存在する場合",
+            ["エラー", "置換（DROP & CREATE）", "追記（INSERT）"],
             index=0,
             horizontal=True
         )
         
         if table_name:
             full_table_name = f"{selected_db}.{selected_schema}.{table_name}"
-            st.info(f"📍 Target: `{full_table_name}`")
+            st.info(f"📍 作成先: `{full_table_name}`")
     
+    # プレビューと作成
     st.divider()
     
-    if uploaded_file:
+    if uploaded_file is not None and file_type is not None:
         try:
-            file_type = detect_file_type(uploaded_file)
+            # ファイルポインタをリセット
+            uploaded_file.seek(0)
             
             if file_type in ['CSV', 'TSV']:
                 df = pd.read_csv(
@@ -262,13 +418,45 @@ def render_upload_page(selected_db, selected_schema):
                     header=0 if has_header else None
                 )
             elif file_type == 'JSON':
-                if json_lines:
-                    df = pd.read_json(uploaded_file, lines=True)
-                else:
-                    df = pd.read_json(uploaded_file)
+                # ファイルポインタをリセットして内容を読み込み
+                uploaded_file.seek(0)
+                try:
+                    content = uploaded_file.read().decode('utf-8')
+                except:
+                    uploaded_file.seek(0)
+                    content = uploaded_file.read()
+                    if isinstance(content, bytes):
+                        content = content.decode('utf-8')
+                
+                # JSON形式を自動検出して読み込み
+                content_stripped = content.strip()
+                
+                try:
+                    if content_stripped.startswith('['):
+                        # JSON配列形式
+                        data = json.loads(content)
+                        df = pd.DataFrame(data)
+                    elif content_stripped.startswith('{'):
+                        # 単一オブジェクトまたはJSON Lines
+                        try:
+                            # まず単一オブジェクトとして試す
+                            data = json.loads(content)
+                            df = pd.DataFrame([data])
+                        except:
+                            # JSON Linesとして試す
+                            lines = [json.loads(line) for line in content_stripped.split('\n') if line.strip()]
+                            df = pd.DataFrame(lines)
+                    else:
+                        # JSON Linesとして試す
+                        lines = [json.loads(line) for line in content_stripped.split('\n') if line.strip()]
+                        df = pd.DataFrame(lines)
+                except Exception as json_err:
+                    st.error(f"❌ JSON読み込みエラー: {str(json_err)}")
+                    return
             elif file_type == 'PARQUET':
                 df = pd.read_parquet(uploaded_file)
             elif file_type == 'AVRO':
+                # Avroはfastavroが必要
                 try:
                     import fastavro
                     records = []
@@ -278,68 +466,75 @@ def render_upload_page(selected_db, selected_schema):
                         records.append(record)
                     df = pd.DataFrame(records)
                 except ImportError:
-                    st.error("❌ Avro format requires fastavro library")
+                    st.error("❌ Avro形式の読み込みにはfastavroライブラリが必要です")
                     return
             elif file_type == 'ORC':
+                # ORCはpyarrowが必要
                 try:
                     import pyarrow.orc as orc
                     uploaded_file.seek(0)
                     table = orc.read_table(uploaded_file)
                     df = table.to_pandas()
                 except ImportError:
-                    st.error("❌ ORC format requires pyarrow library")
+                    st.error("❌ ORC形式の読み込みにはpyarrowライブラリが必要です")
                     return
             else:
-                st.error("❌ Unsupported file format")
+                st.error("❌ 未対応のファイル形式です")
                 return
             
-            st.subheader("3️⃣ Data Preview")
+            st.subheader("3️⃣ データプレビュー")
             
+            # 統計情報
             col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
             with col_stat1:
-                st.metric("Rows", f"{len(df):,}")
+                st.metric("行数", f"{len(df):,}")
             with col_stat2:
-                st.metric("Columns", len(df.columns))
+                st.metric("列数", len(df.columns))
             with col_stat3:
-                st.metric("Format", file_type)
+                st.metric("ファイル形式", file_type)
             with col_stat4:
-                st.metric("Size", f"{uploaded_file.size / 1024:.1f} KB")
+                st.metric("サイズ", f"{uploaded_file.size / 1024:.1f} KB")
             
+            # データプレビュー
             st.dataframe(df.head(10), use_container_width=True, height=300)
             
-            with st.expander("📋 Column Information"):
+            # カラム情報
+            with st.expander("📋 カラム情報"):
                 col_df = pd.DataFrame({
-                    'Column': df.columns,
-                    'Type': df.dtypes.astype(str),
-                    'Nulls': df.isnull().sum().values,
-                    'Sample': [str(df[col].iloc[0])[:50] if len(df) > 0 else '' for col in df.columns]
+                    'カラム名': df.columns,
+                    'データ型': df.dtypes.astype(str),
+                    'Null数': df.isnull().sum().values,
+                    'サンプル値': [str(df[col].iloc[0])[:50] if len(df) > 0 else '' for col in df.columns]
                 })
                 st.dataframe(col_df, use_container_width=True)
             
             st.divider()
             
-            st.subheader("4️⃣ Create Table")
+            # 作成ボタン
+            st.subheader("4️⃣ テーブル作成")
             
-            if st.button("🚀 Create Table", type="primary", use_container_width=True):
-                with st.spinner("Creating table..."):
+            if st.button("🚀 テーブルを作成", type="primary", use_container_width=True):
+                with st.spinner("テーブルを作成中..."):
                     try:
+                        # 完全修飾名を使用（USE DATABASE/SCHEMAはStreamlitでは使用不可）
                         full_table_path = f"{selected_db}.{selected_schema}.{table_name}"
                         
-                        if if_exists == "Replace (DROP & CREATE)":
+                        if if_exists == "置換（DROP & CREATE）":
                             session.sql(f"DROP TABLE IF EXISTS {full_table_path}").collect()
                         
                         snowpark_df = session.create_dataframe(df)
                         
-                        if if_exists == "Append (INSERT)":
+                        if if_exists == "追記（INSERT）":
                             snowpark_df.write.mode("append").save_as_table(full_table_path)
                         else:
                             snowpark_df.write.mode("errorifexists").save_as_table(full_table_path)
                         
-                        st.success(f"✅ Table `{full_table_name}` created successfully!")
+                        st.success(f"✅ テーブル `{full_table_name}` を作成しました！")
                         st.session_state.loaded_table = full_table_name
                         
-                        add_query_history(f"CREATE TABLE {full_table_path}", "Success", len(df))
+                        add_query_history(f"CREATE TABLE {full_table_path}", "成功", len(df))
                         
+                        # 作成後のプレビュー
                         st.code(f"SELECT * FROM {full_table_name} LIMIT 10;", language="sql")
                         
                         result_df = session.sql(f"SELECT * FROM {full_table_path} LIMIT 10").to_pandas()
@@ -347,46 +542,49 @@ def render_upload_page(selected_db, selected_schema):
                         
                         st.snow()
                         
-                        if st.button("🔍 Explore this table"):
+                        # データ探索への誘導
+                        if st.button("🔍 このテーブルを探索する"):
                             st.session_state.current_mode = 'explore'
                             st.rerun()
                         
                     except Exception as e:
-                        add_query_history(f"CREATE TABLE {table_name}", "Failed", 0)
+                        add_query_history(f"CREATE TABLE {table_name}", "失敗", 0)
                         if "already exists" in str(e).lower():
-                            st.error(f"❌ Table `{table_name}` already exists")
+                            st.error(f"❌ テーブル `{table_name}` は既に存在します")
                         else:
-                            st.error(f"❌ Error: {str(e)}")
+                            st.error(f"❌ エラー: {str(e)}")
         
         except Exception as e:
-            st.error(f"❌ File read error: {str(e)}")
+            st.error(f"❌ ファイル読み込みエラー: {str(e)}")
     else:
-        st.info("👆 Please upload a file")
+        st.info("👆 ファイルをアップロードしてください")
 
 # =========================================================
-# Data Explorer Page
+# Part 2: データ探索機能
 # =========================================================
 def render_explore_page(selected_db, selected_schema):
     st.markdown("""
     <div style="text-align: center; padding: 1rem 0;">
         <h1>🔍 Data Explorer</h1>
-        <p style="font-size: 1.1em; color: #666;">Select a table to explore and download data</p>
+        <p style="font-size: 1.1em; color: #666;">テーブルを選択してデータを探索・ダウンロード</p>
     </div>
     """, unsafe_allow_html=True)
     
     st.divider()
     
-    st.subheader("1️⃣ Select Table")
+    # テーブル選択
+    st.subheader("1️⃣ テーブル選択")
     
     tables = get_tables(selected_db, selected_schema)
     
     if not tables:
-        st.warning("📭 No tables found in this schema. Please upload data first.")
-        if st.button("📤 Go to Data Upload"):
+        st.warning("📭 このスキーマにはテーブルがありません。先にデータをアップロードしてください。")
+        if st.button("📤 データアップロードへ"):
             st.session_state.current_mode = 'upload'
             st.rerun()
         return
     
+    # 最近ロードしたテーブルがあればデフォルト選択
     default_idx = 0
     if st.session_state.loaded_table:
         loaded_table_name = st.session_state.loaded_table.split('.')[-1]
@@ -394,7 +592,7 @@ def render_explore_page(selected_db, selected_schema):
             default_idx = tables.index(loaded_table_name)
     
     selected_table = st.selectbox(
-        "Select a table to explore",
+        "探索するテーブルを選択",
         tables,
         index=default_idx
     )
@@ -402,70 +600,121 @@ def render_explore_page(selected_db, selected_schema):
     if selected_table:
         full_table = f"{selected_db}.{selected_schema}.{selected_table}"
         
+        # テーブル情報
         columns = get_table_columns(selected_db, selected_schema, selected_table)
         row_count = session.sql(f"SELECT COUNT(*) FROM {full_table}").collect()[0][0]
         
         col_info1, col_info2 = st.columns(2)
         with col_info1:
-            st.metric("Records", f"{row_count:,}")
+            st.metric("レコード数", f"{row_count:,}")
         with col_info2:
-            st.metric("Columns", len(columns))
+            st.metric("カラム数", len(columns))
+        
+        # AI説明機能のトグル
+        use_ai_descriptions = st.toggle(
+            "🤖 AI生成テーブル・カラム説明を表示",
+            value=True,
+            help="AI_GENERATE_TABLE_DESCを使ってテーブル全体の概要とカラム説明を自動生成します"
+        )
+        
+        # AI説明の取得と表示
+        if use_ai_descriptions:
+            with st.spinner("🤖 AI説明を生成中..."):
+                columns_with_desc, table_description = get_table_columns_with_descriptions(
+                    selected_db, selected_schema, selected_table
+                )
+            
+            # テーブル概要を表示
+            if table_description:
+                st.info(f"**📋 テーブル概要**: {table_description}")
+            else:
+                st.warning("⚠️ テーブル概要を生成できませんでした。Cortex AIの権限を確認してください。")
         
         st.divider()
         
-        st.subheader("2️⃣ Select Columns")
+        # カラム選択
+        st.subheader("2️⃣ 表示カラムを選択")
         
         col_names = [c[0] for c in columns]
         
+        # セッション状態でカラム選択を管理
         table_key = f"selected_cols_{selected_table}"
         if table_key not in st.session_state:
             st.session_state[table_key] = []
         
         col_select1, col_select2 = st.columns([3, 1])
         with col_select2:
-            if st.button("Select All", use_container_width=True):
+            if st.button("全選択", use_container_width=True):
                 st.session_state[table_key] = col_names.copy()
                 st.rerun()
-            if st.button("Deselect All", use_container_width=True):
+            if st.button("全解除", use_container_width=True):
                 st.session_state[table_key] = []
                 st.rerun()
         
         with col_select1:
             selected_columns = st.multiselect(
-                "Select columns (empty = all columns)",
+                "カラムを選択（空の場合は全カラム）",
                 col_names,
                 default=st.session_state[table_key],
-                help="Multiple selection allowed",
+                help="複数選択可能",
                 key=f"multiselect_{selected_table}"
             )
+            # 選択状態を保存
             st.session_state[table_key] = selected_columns
         
-        with st.expander("📋 Column Information"):
-            col_df = pd.DataFrame(columns, columns=['Column', 'Type'])
-            st.dataframe(col_df, use_container_width=True)
+        # カラム情報テーブル（AI説明付き）
+        with st.expander("📋 カラム情報", expanded=use_ai_descriptions):
+            if use_ai_descriptions and columns_with_desc:
+                # AI説明付きのカラム情報を表示
+                display_data = []
+                for col_info in columns_with_desc:
+                    display_data.append({
+                        'カラム名': col_info['name'],
+                        'データ型': col_info['type'],
+                        'AI説明': col_info.get('ai_description', ''),
+                        'サンプル値': col_info.get('sample_values', '')
+                    })
+                
+                col_df = pd.DataFrame(display_data)
+                
+                # カラム設定
+                column_config = {
+                    "カラム名": st.column_config.TextColumn("カラム名", width="medium"),
+                    "データ型": st.column_config.TextColumn("データ型", width="small"),
+                    "AI説明": st.column_config.TextColumn("AI説明", width="large", help="AI_GENERATE_TABLE_DESCで生成された説明"),
+                    "サンプル値": st.column_config.TextColumn("サンプル値", width="medium", help="実際のデータサンプル")
+                }
+                
+                st.dataframe(col_df, column_config=column_config, use_container_width=True, hide_index=True)
+            else:
+                # 基本的なカラム情報のみ表示
+                col_df = pd.DataFrame(columns, columns=['カラム名', 'データ型'])
+                st.dataframe(col_df, use_container_width=True)
         
         st.divider()
         
-        st.subheader("3️⃣ Filter Conditions (WHERE)")
+        # WHERE条件
+        st.subheader("3️⃣ 絞り込み条件（WHERE句）")
         
+        # 条件入力UI
         where_conditions = []
         
-        num_conditions = st.number_input("Number of conditions", min_value=0, max_value=5, value=0)
+        num_conditions = st.number_input("条件数", min_value=0, max_value=5, value=0)
         
         for i in range(int(num_conditions)):
-            st.markdown(f"**Condition {i+1}**")
+            st.markdown(f"**条件 {i+1}**")
             cond_col1, cond_col2, cond_col3, cond_col4 = st.columns([2, 1, 2, 1])
             
             with cond_col1:
                 cond_column = st.selectbox(
-                    "Column",
+                    "カラム",
                     col_names,
                     key=f"cond_col_{i}"
                 )
             
             with cond_col2:
                 cond_operator = st.selectbox(
-                    "Operator",
+                    "演算子",
                     ["=", "!=", ">", ">=", "<", "<=", "LIKE", "IN", "IS NULL", "IS NOT NULL"],
                     key=f"cond_op_{i}"
                 )
@@ -475,15 +724,15 @@ def render_explore_page(selected_db, selected_schema):
                     cond_value = ""
                 else:
                     cond_value = st.text_input(
-                        "Value",
+                        "値",
                         key=f"cond_val_{i}",
-                        help="Wrap strings in quotes: 'value'"
+                        help="文字列は 'value' のようにクォートで囲んでください"
                     )
             
             with cond_col4:
                 if i < int(num_conditions) - 1:
                     cond_logic = st.selectbox(
-                        "Logic",
+                        "論理",
                         ["AND", "OR"],
                         key=f"cond_logic_{i}"
                     )
@@ -505,25 +754,27 @@ def render_explore_page(selected_db, selected_schema):
                     'logic': cond_logic
                 })
         
+        # カスタムWHERE句
         custom_where = st.text_area(
-            "Or enter WHERE clause directly (can be combined with above)",
-            placeholder="Example: AMOUNT > 10000 AND STATUS = 'ACTIVE'",
-            help="Do not include the WHERE keyword"
+            "または、WHERE句を直接入力（上記条件と併用可）",
+            placeholder="例: AMOUNT > 10000 AND STATUS = 'ACTIVE'",
+            help="WHERE キーワードは不要です"
         )
         
         st.divider()
         
-        st.subheader("4️⃣ Additional Options")
+        # その他のオプション
+        st.subheader("4️⃣ その他のオプション")
         
         opt_col1, opt_col2, opt_col3 = st.columns(3)
         
         with opt_col1:
             order_by = st.selectbox(
                 "ORDER BY",
-                ["None"] + col_names
+                ["なし"] + col_names
             )
-            if order_by != "None":
-                order_dir = st.radio("Sort order", ["ASC", "DESC"], horizontal=True)
+            if order_by != "なし":
+                order_dir = st.radio("並び順", ["ASC", "DESC"], horizontal=True)
         
         with opt_col2:
             limit = st.number_input(
@@ -534,15 +785,18 @@ def render_explore_page(selected_db, selected_schema):
             )
         
         with opt_col3:
-            distinct = st.checkbox("DISTINCT (remove duplicates)")
+            distinct = st.checkbox("DISTINCT（重複排除）")
         
         st.divider()
         
-        st.subheader("5️⃣ Generated SQL")
+        # SQL生成
+        st.subheader("5️⃣ 生成されたSQL")
         
+        # カラム名をダブルクォートで囲む関数（大文字小文字を保持）
         def quote_column(col_name):
             return f'"{col_name}"'
         
+        # SELECT句
         if selected_columns:
             select_clause = ", ".join([quote_column(c) for c in selected_columns])
         else:
@@ -551,6 +805,7 @@ def render_explore_page(selected_db, selected_schema):
         if distinct:
             select_clause = f"DISTINCT {select_clause}"
         
+        # WHERE句の構築
         where_parts = []
         for cond in where_conditions:
             quoted_col = quote_column(cond['column'])
@@ -568,10 +823,12 @@ def render_explore_page(selected_db, selected_schema):
             else:
                 where_clause = custom_where
         
+        # ORDER BY句
         order_clause = ""
-        if order_by != "None":
+        if order_by != "なし":
             order_clause = f"ORDER BY {quote_column(order_by)} {order_dir}"
         
+        # 完全なSQL
         sql = f"SELECT {select_clause}\nFROM {full_table}"
         if where_clause:
             sql += f"\nWHERE {where_clause}"
@@ -579,53 +836,59 @@ def render_explore_page(selected_db, selected_schema):
             sql += f"\n{order_clause}"
         sql += f"\nLIMIT {limit}"
         
+        # SQL表示（編集可能）
         edited_sql = st.text_area(
-            "SQL (editable)",
+            "SQL（編集可能）",
             value=sql,
             height=150
         )
         
+        # 実行ボタン
         col_btn1, col_btn2 = st.columns(2)
         
         with col_btn1:
-            execute = st.button("▶️ Execute SQL", type="primary", use_container_width=True)
+            execute = st.button("▶️ SQLを実行", type="primary", use_container_width=True)
         
         with col_btn2:
-            copy_sql = st.button("📋 Copy SQL", use_container_width=True)
+            copy_sql = st.button("📋 SQLをコピー", use_container_width=True)
             if copy_sql:
                 st.code(edited_sql, language="sql")
-                st.info("👆 Copy the code above")
+                st.info("👆 上のコードをコピーしてください")
         
+        # 実行結果
         if execute:
             st.divider()
-            st.subheader("6️⃣ Results")
+            st.subheader("6️⃣ 実行結果")
             
-            with st.spinner("Executing query..."):
+            with st.spinner("クエリ実行中..."):
                 try:
                     start_time = datetime.now()
                     result_df = session.sql(edited_sql).to_pandas()
                     execution_time = (datetime.now() - start_time).total_seconds()
                     
-                    add_query_history(edited_sql, "Success", len(result_df))
+                    add_query_history(edited_sql, "成功", len(result_df))
                     
+                    # 結果情報
                     res_col1, res_col2, res_col3 = st.columns(3)
                     with res_col1:
-                        st.metric("Rows", f"{len(result_df):,}")
+                        st.metric("取得行数", f"{len(result_df):,}")
                     with res_col2:
-                        st.metric("Columns", len(result_df.columns))
+                        st.metric("カラム数", len(result_df.columns))
                     with res_col3:
-                        st.metric("Execution Time", f"{execution_time:.2f}s")
+                        st.metric("実行時間", f"{execution_time:.2f}秒")
                     
+                    # 結果表示
                     st.dataframe(result_df, use_container_width=True, height=400)
                     
-                    st.markdown("### 📥 Download Data")
+                    # ダウンロードボタン
+                    st.markdown("### 📥 データダウンロード")
                     
                     dl_col1, dl_col2, dl_col3 = st.columns(3)
                     
                     with dl_col1:
                         csv_data = result_df.to_csv(index=False)
                         st.download_button(
-                            label="📄 Download CSV",
+                            label="📄 CSVでダウンロード",
                             data=csv_data,
                             file_name=f"{selected_table}_export.csv",
                             mime="text/csv",
@@ -635,7 +898,7 @@ def render_explore_page(selected_db, selected_schema):
                     with dl_col2:
                         json_data = result_df.to_json(orient='records', force_ascii=False, indent=2)
                         st.download_button(
-                            label="📋 Download JSON",
+                            label="📋 JSONでダウンロード",
                             data=json_data,
                             file_name=f"{selected_table}_export.json",
                             mime="application/json",
@@ -643,37 +906,41 @@ def render_explore_page(selected_db, selected_schema):
                         )
                     
                     with dl_col3:
+                        # TSV（タブ区切り）ダウンロード - Excelで開ける形式
                         tsv_data = result_df.to_csv(index=False, sep='\t')
                         st.download_button(
-                            label="📊 Download TSV",
+                            label="📊 TSVでダウンロード",
                             data=tsv_data,
                             file_name=f"{selected_table}_export.tsv",
                             mime="text/tab-separated-values",
                             use_container_width=True,
-                            help="Tab-separated format - Opens in Excel"
+                            help="タブ区切り形式 - Excelで開けます"
                         )
                     
-                    st.success("✅ Query executed successfully")
+                    st.success("✅ クエリが正常に実行されました")
                     
                 except Exception as e:
-                    add_query_history(edited_sql, "Failed", 0)
-                    st.error(f"❌ Query error: {str(e)}")
+                    add_query_history(edited_sql, "失敗", 0)
+                    st.error(f"❌ クエリ実行エラー: {str(e)}")
 
 # =========================================================
-# Main Application
+# メインアプリケーション
 # =========================================================
 def main():
+    # サイドバー
     selected_db, selected_schema = render_sidebar()
     
+    # モードに応じたページ表示
     if st.session_state.current_mode == 'upload':
         render_upload_page(selected_db, selected_schema)
     else:
         render_explore_page(selected_db, selected_schema)
     
+    # フッター
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #666; padding: 0.5rem;'>"
-        "📊 Data Loader & Explorer - Streamlit in Snowflake</div>",
+        "📊 Data Loader & Explorer - Frosty Friday Week 80 Demo</div>",
         unsafe_allow_html=True
     )
 
