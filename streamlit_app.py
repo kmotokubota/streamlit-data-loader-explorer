@@ -86,32 +86,11 @@ def get_table_columns(database, schema, table):
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_table_descriptions_with_ai(database: str, schema: str, table: str):
-    """AI_GENERATE_TABLE_DESCを使ってテーブル・カラム説明を生成（10分キャッシュ）"""
+    """CORTEX.COMPLETEを使ってテーブル・カラム説明を生成（10分キャッシュ）"""
     import re
     
     full_table_name = f"{database}.{schema}.{table}"
     
-    # AI_GENERATE_TABLE_DESCを試行
-    try:
-        # AI_GENERATE_TABLE_DESCのクエリ（日本語で回答を要求）
-        ai_query = f"""
-        SELECT SNOWFLAKE.CORTEX.AI_GENERATE_TABLE_DESC(
-            TABLE_NAME => '{full_table_name}',
-            LANGUAGE => 'ja'
-        )
-        """
-        ai_result = session.sql(ai_query).collect()
-        
-        if ai_result and ai_result[0][0]:
-            ai_data = json.loads(ai_result[0][0])
-            return {
-                'table_description': ai_data.get('table_description', ''),
-                'column_descriptions': ai_data.get('column_descriptions', {})
-            }
-    except Exception:
-        pass
-    
-    # AI_GENERATE_TABLE_DESCが使えない場合、CORTEX.COMPLETEで代替実装
     try:
         # テーブル構造を取得
         describe_result = session.sql(f"DESCRIBE TABLE {full_table_name}").collect()
@@ -142,7 +121,7 @@ def get_table_descriptions_with_ai(database: str, schema: str, table: str):
         
         # プロンプトをエスケープ
         escaped_prompt = prompt.replace("'", "''")
-        cortex_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', '{escaped_prompt}')"
+        cortex_query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-4-sonnet', '{escaped_prompt}')"
         cortex_result = session.sql(cortex_query).collect()
         
         if cortex_result and cortex_result[0][0]:
@@ -614,7 +593,7 @@ def render_explore_page(selected_db, selected_schema):
         use_ai_descriptions = st.toggle(
             "🤖 AI生成テーブル・カラム説明を表示",
             value=True,
-            help="AI_GENERATE_TABLE_DESCを使ってテーブル全体の概要とカラム説明を自動生成します"
+            help="CORTEX.COMPLETE (claude-4-sonnet) を使ってテーブル全体の概要とカラム説明を自動生成します"
         )
         
         # AI説明の取得と表示
@@ -681,7 +660,7 @@ def render_explore_page(selected_db, selected_schema):
                 column_config = {
                     "カラム名": st.column_config.TextColumn("カラム名", width="medium"),
                     "データ型": st.column_config.TextColumn("データ型", width="small"),
-                    "AI説明": st.column_config.TextColumn("AI説明", width="large", help="AI_GENERATE_TABLE_DESCで生成された説明"),
+                    "AI説明": st.column_config.TextColumn("AI説明", width="large", help="CORTEX.COMPLETE (claude-4-sonnet) で生成された説明"),
                     "サンプル値": st.column_config.TextColumn("サンプル値", width="medium", help="実際のデータサンプル")
                 }
                 
