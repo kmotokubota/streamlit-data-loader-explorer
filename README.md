@@ -58,6 +58,17 @@ A comprehensive **Streamlit in Snowflake** application for data ingestion and ex
 6. Click **"Execute SQL"** to run the query
 7. **Download** results in your preferred format
 
+## 📁 Sample Data
+
+The `data/` directory contains sample files for testing:
+
+| File | Description |
+|------|-------------|
+| `credit_card_customers.csv` | Credit card customer data with PII fields |
+| `transactions.csv` | Transaction data with fraud detection patterns |
+| `employee_data.csv` | Employee information for HR analytics |
+| `sample_products.json` | Product catalog in JSON format |
+
 ## 🔧 Supported File Formats
 
 | Format | Extension | Notes |
