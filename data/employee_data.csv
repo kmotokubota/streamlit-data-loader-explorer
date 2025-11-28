@@ -1,0 +1,11 @@
+employee_id,first_name,last_name,department,hire_date,salary,is_manager,performance_score
+E001,Taro,Yamada,Engineering,2020-04-01,750000,true,4.5
+E002,Hanako,Suzuki,Marketing,2019-08-15,620000,false,4.2
+E003,Ichiro,Tanaka,Engineering,2021-01-10,680000,false,3.8
+E004,Yuki,Sato,Sales,2018-03-20,580000,true,4.7
+E005,Kenji,Watanabe,HR,2022-06-01,520000,false,4.0
+E006,Mika,Kobayashi,Engineering,2020-09-15,720000,false,4.3
+E007,Takeshi,Ito,Finance,2017-11-01,850000,true,4.6
+E008,Sakura,Nakamura,Marketing,2023-02-01,480000,false,3.9
+E009,Ryo,Yamamoto,Sales,2019-05-10,610000,false,4.1
+E010,Emi,Kato,Engineering,2021-07-20,690000,false,4.4

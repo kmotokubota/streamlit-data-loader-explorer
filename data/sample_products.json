@@ -1,0 +1,12 @@
+[
+  {"product_id": "P001", "product_name": "Wireless Earbuds", "category": "Electronics", "price": 15800, "stock": 250, "rating": 4.5},
+  {"product_id": "P002", "product_name": "Smart Watch", "category": "Electronics", "price": 35000, "stock": 120, "rating": 4.2},
+  {"product_id": "P003", "product_name": "Running Shoes", "category": "Sports", "price": 12000, "stock": 80, "rating": 4.8},
+  {"product_id": "P004", "product_name": "Coffee Maker", "category": "Home", "price": 8500, "stock": 45, "rating": 4.0},
+  {"product_id": "P005", "product_name": "Yoga Mat", "category": "Sports", "price": 3500, "stock": 200, "rating": 4.6},
+  {"product_id": "P006", "product_name": "Bluetooth Speaker", "category": "Electronics", "price": 9800, "stock": 150, "rating": 4.3},
+  {"product_id": "P007", "product_name": "Travel Backpack", "category": "Travel", "price": 7800, "stock": 90, "rating": 4.7},
+  {"product_id": "P008", "product_name": "Desk Lamp", "category": "Home", "price": 4500, "stock": 110, "rating": 4.1},
+  {"product_id": "P009", "product_name": "Protein Powder", "category": "Health", "price": 5800, "stock": 300, "rating": 4.4},
+  {"product_id": "P010", "product_name": "Mechanical Keyboard", "category": "Electronics", "price": 18000, "stock": 60, "rating": 4.9}
+]
